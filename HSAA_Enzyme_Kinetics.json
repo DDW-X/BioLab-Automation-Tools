@@ -1,0 +1,197 @@
+{
+  "name": "HSAA_Enzyme_Kinetics_Fixed",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Start Analysis",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// تولید داده‌های آزمایشگاهی ساختگی برای آمیلاز بزاقی\nreturn [\n  {\n    json: {\n      batch_id: \"BATCH-2025-X99\",\n      operator: \"Dr. CyberResearcher\",\n      reaction_time_min: 10,\n      // داده‌های استاندارد برای منحنی کالیبراسیون (گلوکز/مالتوز)\n      standards: [\n        { concentration_mg_mL: 0, absorbance: [0.005, 0.004, 0.006] },\n        { concentration_mg_mL: 0.2, absorbance: [0.150, 0.155, 0.148] },\n        { concentration_mg_mL: 0.4, absorbance: [0.300, 0.310, 0.295] },\n        { concentration_mg_mL: 0.8, absorbance: [0.600, 0.590, 0.610] },\n        { concentration_mg_mL: 1.0, absorbance: [0.750, 0.760, 0.740] }\n      ],\n      // داده‌های سینتیک (غلظت سوبسترا متغیر)\n      kinetics_data: [\n        { substrate_conc_mM: 0.5, replicates: [0.050, 0.052, 0.049] },\n        { substrate_conc_mM: 1.0, replicates: [0.090, 0.095, 0.092] },\n        { substrate_conc_mM: 2.5, replicates: [0.180, 0.185, 0.178] },\n        { substrate_conc_mM: 5.0, replicates: [0.280, 0.275, 0.285] },\n        { substrate_conc_mM: 10.0, replicates: [0.400, 0.410, 0.395] },\n        { substrate_conc_mM: 20.0, replicates: [0.550, 0.540, 0.560] }\n      ]\n    }\n  }\n];"
+      },
+      "id": "mock-generator",
+      "name": "Generate Lab Data (Mock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- ADVANCED BIOCHEMICAL STATISTICAL ENGINE ---\n// Methods: Linear Regression (OLS), Lineweaver-Burk Transformation\n\nconst inputData = $input.first().json;\nconst standards = inputData.standards;\nconst kinetics = inputData.kinetics_data;\nconst reactionTime = inputData.reaction_time_min || 10;\n\n// Helper: Mean Calculation\nconst calcStats = (arr) => {\n    const n = arr.length;\n    const mean = arr.reduce((a, b) => a + b, 0) / n;\n    return { mean };\n};\n\n// Helper: Linear Regression\nconst linearRegression = (xVals, yVals) => {\n    const n = xVals.length;\n    const sumX = xVals.reduce((a, b) => a + b, 0);\n    const sumY = yVals.reduce((a, b) => a + b, 0);\n    const sumXY = xVals.reduce((sum, xi, i) => sum + xi * yVals[i], 0);\n    const sumXX = xVals.reduce((sum, xi) => sum + xi * xi, 0);\n    const sumYY = yVals.reduce((sum, yi) => sum + yi * yi, 0);\n\n    const denominator = (n * sumXX - sumX * sumX);\n    if (denominator === 0) return { slope: 0, intercept: 0, r2: 0 };\n\n    const slope = (n * sumXY - sumX * sumY) / denominator;\n    const intercept = (sumY - slope * sumX) / n;\n\n    const ssTotal = sumYY - (sumY * sumY) / n;\n    const ssRes = sumYY - intercept * sumY - slope * sumXY;\n    const r2 = ssTotal !== 0 ? 1 - (ssRes / ssTotal) : 0;\n\n    return { slope, intercept, r2 };\n};\n\n// 1. Process Standards (Calibration Curve)\nlet calX = [];\nlet calY = [];\nstandards.forEach(std => {\n    const stats = calcStats(std.absorbance);\n    calX.push(std.concentration_mg_mL);\n    calY.push(stats.mean);\n});\n\nconst calRegression = linearRegression(calX, calY);\nconst calibrationValid = calRegression.r2 >= 0.98;\n\n// 2. Process Kinetics\nlet kineticResults = {};\nlet mmPlotData = [];\nlet lbPlotData = [];\n\nif (calibrationValid) {\n    kinetics.forEach(k => {\n        const stats = calcStats(k.replicates);\n        // Convert Abs to Conc using Calibration Curve: x = (y - c) / m\n        const productConc = (stats.mean - calRegression.intercept) / calRegression.slope;\n        const v0 = productConc / reactionTime;\n\n        mmPlotData.push({ x: k.substrate_conc_mM, y: v0 });\n\n        // Lineweaver-Burk Data (1/S vs 1/V)\n        if (k.substrate_conc_mM > 0 && v0 > 0) {\n            lbPlotData.push({ x: 1 / k.substrate_conc_mM, y: 1 / v0 });\n        }\n    });\n\n    // LB Regression to find Km & Vmax\n    const lbX = lbPlotData.map(d => d.x);\n    const lbY = lbPlotData.map(d => d.y);\n    const lbRegression = linearRegression(lbX, lbY);\n\n    // Vmax = 1 / y-intercept\n    const Vmax = 1 / lbRegression.intercept;\n    // Km = slope * Vmax\n    const Km = lbRegression.slope * Vmax;\n\n    kineticResults = {\n        Vmax: Vmax.toFixed(4),\n        Km: Km.toFixed(4),\n        Lineweaver_R2: lbRegression.r2.toFixed(4)\n    };\n}\n\nreturn {\n    json: {\n        meta: inputData,\n        calibration: {\n            valid: calibrationValid,\n            r2: calRegression.r2.toFixed(4)\n        },\n        kinetics: kineticResults,\n        visualization: { mm_data: mmPlotData }\n    }\n};"
+      },
+      "id": "biochem-engine",
+      "name": "Biochemical Statistical Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.calibration.valid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "qc-gate",
+      "name": "QC Gate: Calibration Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://quickchart.io/chart",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chart",
+              "value": "={{ {\n  type: 'scatter',\n  data: {\n    datasets: [{\n      label: 'Michaelis-Menten Kinetics',\n      data: $json.visualization.mm_data,\n      backgroundColor: 'rgba(255, 99, 132, 1)',\n      showLine: true,\n      borderColor: 'rgba(255, 99, 132, 1)',\n      fill: false\n    }]\n  },\n  options: {\n    title: {\n      display: true,\n      text: 'HSAA Enzyme Activity (V0 vs [S])'\n    },\n    scales: {\n      xAxes: [{ \n        type: 'linear', \n        position: 'bottom', \n        scaleLabel: { display: true, labelString: 'Substrate Concentration (mM)' } \n      }],\n      yAxes: [{ \n        scaleLabel: { display: true, labelString: 'Velocity (mg/mL/min)' } \n      }]\n    }\n  }\n} }}"
+            },
+            {
+              "name": "width",
+              "value": "600"
+            },
+            {
+              "name": "height",
+              "value": "400"
+            }
+          ]
+        }
+      },
+      "id": "generate-chart",
+      "name": "Generate Chart",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        700,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 📊 گزارش نهایی آنالیز سینتیک HSAA\n\n**وضعیت کالیبراسیون:** ✅ معتبر ($R^2$: {{ $json.calibration_r2 }})\n\n---\n### نتایج سینتیکی (محاسبه شده با Lineweaver-Burk):\n- **سرعت حداکثر (Vmax):** {{ $json.results.Vmax }} mg/mL/min\n- **ثابت میکائلیس (Km):** {{ $json.results.Km }} mM\n\n---\n
+
+[Image of Chart]
+({{ $json.report_chart }})"
+      },
+      "id": "final-report",
+      "name": "Format Report",
+      "type": "n8n-nodes-base.markdown",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "merge-data",
+      "name": "Merge Chart & Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 1,
+      "position": [
+        920,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Start Analysis": {
+      "main": [
+        [
+          {
+            "node": "Generate Lab Data (Mock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Lab Data (Mock)": {
+      "main": [
+        [
+          {
+            "node": "Biochemical Statistical Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Biochemical Statistical Engine": {
+      "main": [
+        [
+          {
+            "node": "QC Gate: Calibration Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QC Gate: Calibration Valid?": {
+      "main": [
+        [
+          {
+            "node": "Generate Chart",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Chart": {
+      "main": [
+        [
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Data": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
